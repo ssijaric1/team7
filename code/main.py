@@ -3,19 +3,20 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from collections import Counter
 from torchvision import models, datasets, transforms
 from torch.utils.data import DataLoader, WeightedRandomSampler
+from collections import Counter
 from tqdm import tqdm
 
+
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train ResNet on FER-2013 with fine-tuning and augmentation')
+    parser = argparse.ArgumentParser(description='Train ResNet on FER-2013 with advanced fine-tuning')
     parser.add_argument('--data-dir', type=str, default=None,
                         help='path to data directory (should contain train/ and test/)')
     parser.add_argument('--batch-size', type=int, default=64, help='input batch size')
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train')
-    parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
-    parser.add_argument('--patience', type=int, default=7,
+    parser.add_argument('--lr', type=float, default=1e-4, help='initial learning rate')
+    parser.add_argument('--patience', type=int, default=3,
                         help='early stopping patience (epochs without improvement)')
     parser.add_argument('--weight-decay', type=float, default=1e-4,
                         help='weight decay for optimizer')
@@ -40,7 +41,7 @@ def main():
     num_classes = 7
     batch_size = args.batch_size
     num_epochs = args.epochs
-    learning_rate = args.lr
+    initial_lr = args.lr
     patience = args.patience
 
     # Data transforms with augmentation
@@ -64,20 +65,19 @@ def main():
     train_dataset = datasets.ImageFolder(train_dir, transform=train_transform)
     test_dataset = datasets.ImageFolder(test_dir, transform=test_transform)
 
-    # Compute class weights for imbalanced dataset correctly
-    # Count occurrences per class
+    # Compute class weights and normalize
     targets = [label for _, label in train_dataset.samples]
     class_counts = [0] * num_classes
     for label in targets:
         class_counts[label] += 1
-    # Inverse frequency for weights
-    class_weights = [0] * num_classes
-    for i in range(num_classes):
-        if class_counts[i] > 0:
-            class_weights[i] = 1.0 / class_counts[i]
-        else:
-            class_weights[i] = 0.0
-    # Assign sample weights
+    class_weights = []
+    for count in class_counts:
+        class_weights.append((1.0 / count) if count > 0 else 0.0)
+    # Normalize weights to sum to num_classes
+    weight_tensor = torch.tensor(class_weights, dtype=torch.float)
+    weight_tensor = weight_tensor / weight_tensor.sum() * num_classes
+
+    # Sampler for balanced batches
     sample_weights = [class_weights[label] for label in targets]
     sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
 
@@ -87,35 +87,45 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=batch_size,
                              shuffle=False, num_workers=2)
 
-    # Model setup with fine-tuning layer4 + head
-    resnet_weights = models.ResNet18_Weights.DEFAULT
-    model = models.resnet18(weights=resnet_weights)
-    # Freeze all layers except layer4 and fc
+    # Model setup: ResNet18 with advanced fine-tuning
+    model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+    # Unfreeze layer3, layer4, and fc; freeze others
     for name, param in model.named_parameters():
-        if not name.startswith('layer4') and not name.startswith('fc'):
+        if not (name.startswith('layer3') or name.startswith('layer4') or name.startswith('fc')):
             param.requires_grad = False
-    # Replace head with dropout + linear
+    # Replace classifier head
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
         nn.Dropout(0.5),
-        nn.Linear(in_features, num_classes)
+        nn.Linear(in_features, 256),
+        nn.BatchNorm1d(256),
+        nn.ReLU(inplace=True),
+        nn.Dropout(0.5),
+        nn.Linear(256, num_classes)
     )
     model = model.to(device)
 
-    # Loss with class weights
-    weight_tensor = torch.tensor(class_weights, dtype=torch.float).to(device)
-    criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+    # Loss with label smoothing and class weights
+    criterion = nn.CrossEntropyLoss(weight=weight_tensor.to(device), label_smoothing=0.1)
 
-    # Optimizer & scheduler
+    # Optimizer and OneCycleLR scheduler
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = optim.Adam(trainable_params, lr=learning_rate, weight_decay=args.weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
+    optimizer = optim.Adam(trainable_params, lr=initial_lr, weight_decay=args.weight_decay)
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=initial_lr,
+        steps_per_epoch=len(train_loader),
+        epochs=num_epochs,
+        pct_start=0.3,
+        div_factor=10,
+        final_div_factor=100
+    )
 
-    # Early stopping variables
+    # Early stopping setup
     best_val_loss = float('inf')
     epochs_no_improve = 0
 
-    # Training loop
+    # Training loop with gradient clipping
     for epoch in range(1, num_epochs + 1):
         model.train()
         running_loss = 0.0
@@ -125,7 +135,10 @@ def main():
             outputs = model(images)
             loss = criterion(outputs, labels)
             loss.backward()
+            # Gradient clipping
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
             running_loss += loss.item() * images.size(0)
 
         train_loss = running_loss / len(train_loader.dataset)
@@ -147,13 +160,11 @@ def main():
         val_loss /= len(test_loader.dataset)
         val_acc = 100 * correct / total
 
-        # Scheduler step and logging
-        scheduler.step(val_loss)
         print(f"Epoch {epoch}/{num_epochs} — Train Loss: {train_loss:.4f}, "
               f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, "
               f"LR: {optimizer.param_groups[0]['lr']:.2e}")
 
-        # Early stopping
+        # Early stopping check
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             epochs_no_improve = 0
