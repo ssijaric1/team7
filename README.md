@@ -15,14 +15,20 @@ The model leverages data augmentation and weighted loss to handle class imbalanc
 
 To train the model:
 
-```bash
+```
 python train.py --epochs 15 --batch-size 32
 ```
 
 To evaluate on the test set:
 
-```bash
+```
 python evaluate.py --model-path models/best_model.pth
+```
+
+To test for a specific emotion from the training set:
+
+```
+python code/validation.py --data-dir data --batch-size 32 --model-path models/best.pth --emotion fear --num-samples 100
 ```
 
 ## Prerequisites
