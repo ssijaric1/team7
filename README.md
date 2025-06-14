@@ -12,7 +12,6 @@ based on a training set with the following categories:
 The model leverages data augmentation and weighted loss to handle class imbalance, and training callbacks like early stopping and learning rate scheduling to optimize performance.
 
 ---
-*About the project*
   
 ## Objectives
 * -> Preprocess and augment the FER‑2013 dataset
