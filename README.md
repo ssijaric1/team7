@@ -48,6 +48,7 @@ Visualizations: Classification report (precision/recall per emotion), training c
 ![results1](https://github.com/user-attachments/assets/1327339e-90ea-4791-863e-49615bcbc6c5)
 
 *Example output for 'happy':*
+
 ![confusion-matrix-happy](https://github.com/user-attachments/assets/80f76920-42e4-4f54-b9d4-a815bb89cc86)
 ![confidence_happy](https://github.com/user-attachments/assets/57afef25-f748-4668-b87f-134ddadc478b)
 
@@ -57,14 +58,26 @@ Visualizations: Classification report (precision/recall per emotion), training c
 *Early stages:*
 At first, by using ResNet and and freezing many initial layers, outputs were very poor (barely reaching 30% accuracy and having high validation loss). These results would start plateauing, which triggered the early stopping at the 7th epoch. 
 ![early-results1](https://github.com/user-attachments/assets/a5b73366-4278-4d5a-801d-a842ad7363d4)
-This was solved by gradually unfreezing layers (specifically 2, 3 and 4). This did help (do ovde si)
+This was solved by gradually unfreezing layers (specifically 2, 3 and 4). This did somewhat improve the accuracy, but by introducing a new problem: validation loss turing up as NaN. This happened because sampler and class weights were added at the same time. 
 
-- Early Overfitting: frozen backbone led to high training accuracy but poor validation performance
-- NaN Loss: instabilities that came from large class weights for rare classes
+*Improving results with ResNet:*
+After fixing the previous issues, and geting up to 45% accuracy, validation loss was still high and the overall training time took up to 2 hours per epoch, which impacted the number of combinations that could be tested. Even though the resuls were improving, getting a model that works well would be a long process. Next logical step was to move onto another, a faster and more compact model, EfficientNet. 
 
-- Class Imbalance: ‘Disgust’ category is severely underrepresented (600 samples vs ~5000 for others), which limits recall
-- Narrow Augmentation: initial augmentations were insufficient to cover data variability
-- Fixes: unfreezing additional layers gradually; enhancing augmentations; appling sanity checks on class weights; using differnt learning rates and regularization
+*After switching to EfficientNet*
+At this step, reducing the data augmentation while increasing dropout and weight decay seemed like a good call, which proved to be ture, as overfitting (previously quite apperent) dropped while validation accuracy jumped by 20%. Using Google Collab's T4 GPU also helped speed up the process.
+
+![results2](https://github.com/user-attachments/assets/94d4d4ea-92b8-4bbf-8149-7e0e1e288c58)
+
+This allowed for trying out different learing rates and setteling on 5e-4 (maked as default in main.py), which lead to improving the model further.
+.
+Then, after deciding to test the model on one class, a new problem appeared. FER-2013's strucutre is as follows:
+
+![image](https://github.com/user-attachments/assets/eab78b1d-6e01-49f8-bc3e-851cb52e0de7)
+making the model unable to pick out a specific emotion, as there were classes it was not trained on. This was fixed by dropping the classes it wasn't trained on inside of the function which polots it's results for a single class. The underrepresented classes (there is a noticable class imbalance in the dataset) still do cause some issues, which can be seen in the level of uncertianty the model has when predicting the class. 
+
+![fear](https://github.com/user-attachments/assets/b0e11de5-a14f-4b65-91ba-5d23d45f354c)
+(example: 'fear' with ~500 samples)
+
 
 ## Conclusions
 Fine-tuned EfficientNet-B0 achieved better results than ResNet, even with more frozen layers.
