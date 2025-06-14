@@ -4,13 +4,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from collections import Counter
 from sklearn.metrics import classification_report, confusion_matrix
 from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 import matplotlib.pyplot as plt
 from PIL import Image
+from torchvision.datasets.folder import default_loader
 
 
 def mixup_data(x, y, alpha=1.0, device='cpu'):
@@ -31,12 +32,7 @@ def parse_args():
 
     # parse training arguments:
     parser = argparse.ArgumentParser(description='Train EfficientNet-B0 on FER-2013')
-    parser.add_argument(
-        '--data-dir',
-        type=str,
-        default='team7/data',
-        help='path to train/ and test/ folders'
-    )
+    parser.add_argument('--data-dir', type=str, default='data', help='path to train/ and test/')
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=15)
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -78,6 +74,38 @@ def test_emotion_distribution(emotion, model, device, transform, dataset, num_sa
     plt.show()
 
 
+class FilteredImageDataset(Dataset):
+    
+    # filtering classes that are not present in training set:
+    def __init__(self, root_dir, class_to_idx, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.class_to_idx = class_to_idx
+        self.samples = []
+        self.classes = list(class_to_idx.keys())
+        
+        # build a list of valid samples (so only classes in training set):
+        for class_name in os.listdir(root_dir):
+            class_path = os.path.join(root_dir, class_name)
+            if not os.path.isdir(class_path) or class_name not in class_to_idx:
+                continue
+                
+            class_idx = class_to_idx[class_name]
+            for img_name in os.listdir(class_path):
+                img_path = os.path.join(class_path, img_name)
+                if os.path.isfile(img_path):
+                    self.samples.append((img_path, class_idx))
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+        img = default_loader(img_path)
+        if self.transform:
+            img = self.transform(img)
+        return img, label
+
 def main():
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -100,20 +128,33 @@ def main():
         transforms.Normalize([0.5]*3, [0.5]*3)
     ])
 
+    # creating the training dataset:
     train_ds = datasets.ImageFolder(train_dir, transform=train_tf)
-    test_ds = datasets.ImageFolder(test_dir, transform=test_tf)
+    num_cls = len(train_ds.classes)
+    
+    # creating the filtered test dataset using training classes:
+    test_ds = FilteredImageDataset(
+        test_dir,
+        class_to_idx=train_ds.class_to_idx,
+        transform=test_tf
+    )
+    test_ds.classes = train_ds.classes
+    test_ds.class_to_idx = train_ds.class_to_idx
 
-    # class weights:
+    print(f"Training classes ({num_cls}): {train_ds.classes}")
+    print(f"Test classes after filtering: {test_ds.classes}")
+    print(f"Train samples: {len(train_ds)}")
+    print(f"Test samples: {len(test_ds)}")
+
     targets = [lbl for _, lbl in train_ds.samples]
     counts = Counter(targets)
-    num_cls = len(train_ds.classes)
     class_weights = torch.tensor([1.0/(counts[i]+1e-6) for i in range(num_cls)], device=device)
     class_weights = class_weights / class_weights.sum() * num_cls
 
     train_ld = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4)
     test_ld = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
-    # model:
+    # setting up the model:
     model = efficientnet_b0(weights=EfficientNet_B0_Weights.DEFAULT)
     in_f = model.classifier[1].in_features
     model.classifier = nn.Sequential(
@@ -125,17 +166,19 @@ def main():
         nn.Linear(256, num_cls)
     )
     model.to(device)
-
-    # optimizer, loss, scheduler:
+    
+    # optimizer, loss, and scheduler:
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.05)
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), 
+                          lr=args.lr, 
+                          weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
 
     best_val = float('inf')
     no_imp = 0
     train_accs, val_accs = [], []
 
-    # training
+    # training:
     for ep in range(1, args.epochs+1):
         model.train()
         total, correct, train_loss = 0, 0, 0
